@@ -50,11 +50,12 @@ var fileSecrets = []fileSecret{
 	{"MAUTRIX_APPSERVICE__AS_TOKEN_FILE", func(c *Config, v string) { c.AppService.ASToken = v }},
 	{"MAUTRIX_APPSERVICE__HS_TOKEN_FILE", func(c *Config, v string) { c.AppService.HSToken = v }},
 	{"MAUTRIX_IMESSAGE__BLUEBUBBLES_PASSWORD_FILE", func(c *Config, v string) { c.IMessage.BlueBubblesPassword = v }},
-	// The double-puppet shared secret. Not a token: the bridge HMAC-SHA512s it
-	// over the MXID and sends the digest as a password, which is what
-	// matrix-synapse-shared-secret-auth verifies. Kept out of the config file
-	// for the same reason as the rest -- it is generated per-deployment and
-	// never has to be seen by a human.
+	// The double-puppet credential. In this fork that is normally the shared
+	// doublepuppet appservice token in "as_token:<token>" form, which
+	// custompuppet.go prefix-matches to assert identity instead of logging in;
+	// upstream's HMAC-shared-secret and "appservice" modes still work if set.
+	// Kept out of the config file for the same reason as the rest -- it is
+	// generated per-deployment and never has to be seen by a human.
 	{"MAUTRIX_BRIDGE__LOGIN_SHARED_SECRET_FILE", func(c *Config, v string) { c.Bridge.LoginSharedSecret = v }},
 }
 
