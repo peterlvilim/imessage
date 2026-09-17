@@ -763,7 +763,16 @@ func (portal *Portal) getRoomCreateContent() *mautrix.ReqCreateRoom {
 
 	var invite []id.UserID
 
-	if portal.IsPrivateChat() {
+	// Invite the bridge bot only when it is actually going to join. Below, it
+	// joins a private chat only if the portal is encrypted; upstream invites it
+	// to every private chat regardless, so on an unencrypted bridge the invite is
+	// never accepted and never withdrawn. Element counts an invited member, so
+	// every one-to-one chat renders as a three-person room named "<contact> and
+	// iMessage bridge bot". Nothing else depends on the invite: GetMatrixUsers
+	// deletes the bot before counting members for cleanup, and if encryption is
+	// enabled later, mautrix-go's own handler joins the bot itself (bridge's
+	// matrix.go, HandleEncryption -> EnsureJoined with a BotOverride).
+	if portal.IsPrivateChat() && portal.Encrypted {
 		invite = append(invite, portal.bridge.Bot.UserID)
 	}
 
