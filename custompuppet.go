@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/appservice"
@@ -32,6 +33,39 @@ import (
 var (
 	ErrMismatchingMXID = errors.New("whoami result does not match custom mxid")
 )
+
+// asTokenModePrefix makes login_shared_secret carry an APPSERVICE token rather
+// than a shared secret: "as_token:<token>". The double puppet then acts by
+// identity assertion (?user_id=) with that appservice's token instead of
+// logging in for a user token.
+//
+// This is not a convenience. Synapse honours the `ts` query parameter ONLY for
+// an appservice requester -- rest/client/room.py:
+//
+//	origin_server_ts = None
+//	if requester.app_service_id:
+//	    origin_server_ts = parse_integer(request, "ts")
+//
+// Both of the modes this bridge already had (the literal "appservice", and the
+// HMAC shared secret) end in mautrix.Client.Login and yield a USER token, so
+// SendMassagedMessageEvent's timestamp is silently discarded and every
+// backfilled message the user sent themselves is stamped with server time. On a
+// history import that means the user's own half of every conversation arrives
+// dated today: measured here as 21,068 of 21,068 own messages, against ghost
+// messages which kept 2018-2026 correctly because those go through the bridge's
+// own appservice.
+//
+// mautrix-go's shared bridge/doublepuppet.go has supported this mode for years;
+// this bridge does not use that helper, which is why it never inherited it.
+// bridgev2 bridges take the same `as_token:` form, which is why mautrix-telegram,
+// -signal and -whatsapp backfill with correct timestamps here and this one did
+// not.
+const asTokenModePrefix = "as_token:"
+
+// usingASToken reports whether login_shared_secret carries an appservice token.
+func (user *User) usingASToken() bool {
+	return strings.HasPrefix(user.bridge.Config.Bridge.LoginSharedSecret, asTokenModePrefix)
+}
 
 var _ bridge.DoublePuppet = (*User)(nil)
 
@@ -49,6 +83,18 @@ func (user *User) CustomIntent() *appservice.IntentAPI {
 
 func (user *User) initDoublePuppet() {
 	var err error
+	if user.usingASToken() {
+		// Nothing to log in with: the token IS the credential, and it is valid
+		// for as long as the registration is. Any user token stored from an
+		// earlier mode is stale and must not be preferred over it.
+		err = user.startCustomMXID()
+		if err != nil {
+			user.log.Warnln("Failed to enable custom puppet via appservice token:", err)
+		} else {
+			user.log.Infoln("Successfully enabled custom puppet via appservice token")
+		}
+		return
+	}
 	if len(user.AccessToken) > 0 {
 		err = user.startCustomMXID()
 		if errors.Is(err, mautrix.MUnknownToken) && len(user.bridge.Config.Bridge.LoginSharedSecret) > 0 {
@@ -102,9 +148,27 @@ func (user *User) loginWithSharedSecret() error {
 }
 
 func (user *User) newDoublePuppetIntent() (*appservice.IntentAPI, error) {
-	client, err := user.bridge.AS.NewExternalMautrixClient(user.MXID, user.AccessToken, user.bridge.Config.Bridge.DoublePuppetServerURL)
-	if err != nil {
-		return nil, err
+	var client *mautrix.Client
+	var err error
+	if user.usingASToken() {
+		// NewMautrixClient, not NewExternalMautrixClient: the former sets
+		// SetAppServiceUserID = true (identity assertion via ?user_id=), the
+		// latter explicitly sets it false because it expects a user token. That
+		// single flag is what makes Synapse see an appservice requester and
+		// therefore accept `ts`.
+		client = user.bridge.AS.NewMautrixClient(user.MXID)
+		client.AccessToken = strings.TrimPrefix(user.bridge.Config.Bridge.LoginSharedSecret, asTokenModePrefix)
+		if url := user.bridge.Config.Bridge.DoublePuppetServerURL; url != "" {
+			client.HomeserverURL, err = mautrix.ParseAndNormalizeBaseURL(url)
+			if err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		client, err = user.bridge.AS.NewExternalMautrixClient(user.MXID, user.AccessToken, user.bridge.Config.Bridge.DoublePuppetServerURL)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	ia := user.bridge.AS.NewIntentAPI("custom")
@@ -122,7 +186,9 @@ func (user *User) clearCustomMXID() {
 }
 
 func (user *User) startCustomMXID() error {
-	if len(user.AccessToken) == 0 {
+	// In as_token mode the credential comes from config, not from user.AccessToken,
+	// which is empty on a fresh database and stale on an upgraded one.
+	if len(user.AccessToken) == 0 && !user.usingASToken() {
 		user.clearCustomMXID()
 		return nil
 	}
