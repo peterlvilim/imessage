@@ -44,6 +44,8 @@ func TestFileSecretsOverrideConfig(t *testing.T) {
 	t.Setenv("MAUTRIX_APPSERVICE__HS_TOKEN_FILE", writeSecret(t, dir, "hs", "hs-from-file"))
 	t.Setenv("MAUTRIX_IMESSAGE__BLUEBUBBLES_PASSWORD_FILE",
 		writeSecret(t, dir, "bb", "p@ss'w|rd&with\\slash\"and#hash and spaces\n"))
+	t.Setenv("MAUTRIX_BRIDGE__LOGIN_SHARED_SECRET_FILE",
+		writeSecret(t, dir, "shared", "shared-from-file\n"))
 
 	cfg, err := unmarshalTestConfig(t)
 	if err != nil {
@@ -58,6 +60,9 @@ func TestFileSecretsOverrideConfig(t *testing.T) {
 	want := "p@ss'w|rd&with\\slash\"and#hash and spaces"
 	if cfg.IMessage.BlueBubblesPassword != want {
 		t.Errorf("bluebubbles_password = %q, want %q", cfg.IMessage.BlueBubblesPassword, want)
+	}
+	if cfg.Bridge.LoginSharedSecret != "shared-from-file" {
+		t.Errorf("login_shared_secret = %q, want %q", cfg.Bridge.LoginSharedSecret, "shared-from-file")
 	}
 }
 
