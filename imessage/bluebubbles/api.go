@@ -64,6 +64,13 @@ type blueBubbles struct {
 	imessageAvailability     map[string]imessageAvailabilityEntry
 	imessageAvailabilityLock sync.RWMutex
 
+	// stopping is closed by Stop. reconnect selects on it so an in-progress
+	// backoff is abandoned at shutdown instead of holding the process open for
+	// up to a minute, and so the retry loop -- which no longer gives up on its
+	// own -- has something that ends it.
+	stopping chan struct{}
+	stopOnce sync.Once
+
 	usingPrivateAPI bool
 }
 
@@ -81,6 +88,7 @@ func NewBlueBubblesConnector(bridge imessage.Bridge) (imessage.API, error) {
 		backfillTaskChan:  make(chan *imessage.BackfillTask, 32),
 
 		imessageAvailability: make(map[string]imessageAvailabilityEntry),
+		stopping:             make(chan struct{}),
 	}, nil
 }
 
@@ -106,6 +114,9 @@ func (bb *blueBubbles) Start(readyCallback func()) error {
 
 func (bb *blueBubbles) Stop() {
 	bb.log.Trace().Msg("Stop")
+	// Once: Stop is reachable more than once on a shutdown path, and closing a
+	// closed channel panics.
+	bb.stopOnce.Do(func() { close(bb.stopping) })
 	bb.stopListening()
 }
 
@@ -245,28 +256,66 @@ func (bb *blueBubbles) pollMessages() error {
 	return nil
 }
 
+// maxReconnectBackoff caps the exponential backoff between reconnect attempts.
+// Reached after ten doublings from 100ms.
+const maxReconnectBackoff = time.Minute
+
+// reconnect re-establishes the BlueBubbles websocket, retrying until it succeeds
+// or the bridge is stopped.
+//
+// It used to give up after twelve attempts, which summed to 819s of backoff --
+// so any BlueBubbles outage longer than about fourteen minutes permanently ended
+// inbound bridging. listenWebSocket's caller responds to the error by calling
+// stopListening and returning, and nothing re-enters the loop: PeriodicSync runs
+// portal.Sync(false), and connectAndListen is only reached from Start. The
+// process stays alive with as.Live still true, so /_matrix/mau/live keeps
+// answering 200 and a health probe against BlueBubbles itself goes back to green
+// the moment the Mac returns. The failure is silent, permanent, and survives
+// exactly the events that cause it -- a Mac asleep, a reboot, or an upgrade of
+// BlueBubbles itself.
+//
+// A bridge whose only job is to follow one websocket has no business deciding
+// the network is gone for good, so it keeps trying on a capped backoff instead.
 func (bb *blueBubbles) reconnect() error {
-	const maxRetryCount = 12
 	retryCount := 0
 
 	bb.stopListening()
 
 	for {
-		bb.log.Info().Msg("Attempting to reconnect to BlueBubbles WebSocket...")
-		if retryCount >= maxRetryCount {
-			err := errors.New("maximum retry attempts reached")
-			bb.log.Error().Err(err).Msg("Maximum retry attempts reached, stopping reconnection attempts to BlueBubbles.")
-			return err
+		select {
+		case <-bb.stopping:
+			bb.log.Info().Msg("Bridge is stopping, abandoning reconnection attempts")
+			return errors.New("bridge is stopping")
+		default:
 		}
+
 		retryCount++
-		// Exponential backoff: 2^retryCount * 100ms
-		sleepTime := time.Duration(math.Pow(2, float64(retryCount))) * 100 * time.Millisecond
-		bb.log.Info().Dur("sleepTime", sleepTime).Msg("Sleeping specified duration before retrying...")
-		time.Sleep(sleepTime)
+		// Exponential backoff from 200ms, capped. math.Pow overflows a Duration
+		// somewhere past the fiftieth attempt, so the cap is load-bearing rather
+		// than just polite: an outage lasting days must not turn into a negative
+		// sleep.
+		sleepTime := maxReconnectBackoff
+		if retryCount < 32 {
+			if backoff := time.Duration(math.Pow(2, float64(retryCount))) * 100 * time.Millisecond; backoff < sleepTime {
+				sleepTime = backoff
+			}
+		}
+		bb.log.Info().Int("attempt", retryCount).Dur("sleepTime", sleepTime).Msg("Sleeping before retrying BlueBubbles websocket...")
+
+		timer := time.NewTimer(sleepTime)
+		select {
+		case <-bb.stopping:
+			timer.Stop()
+			bb.log.Info().Msg("Bridge is stopping, abandoning reconnection attempts")
+			return errors.New("bridge is stopping")
+		case <-timer.C:
+		}
+
+		bb.log.Info().Int("attempt", retryCount).Msg("Attempting to reconnect to BlueBubbles WebSocket...")
 		if err := bb.connectAndListen(); err != nil {
-			bb.log.Error().Err(err).Msg("Error reconnecting to WebSocket")
+			bb.log.Error().Err(err).Int("attempt", retryCount).Msg("Error reconnecting to WebSocket")
 		} else {
-			bb.log.Info().Msg("Successfully reconnected to BlueBubbles websocket.")
+			bb.log.Info().Int("attempt", retryCount).Msg("Successfully reconnected to BlueBubbles websocket.")
 			return nil
 		}
 	}
