@@ -1233,6 +1233,73 @@ func (bb *blueBubbles) isReachableOverIMessage(address string) (available bool, 
 	return remember(res.Data.Available, true)
 }
 
+// resolveTahoeAnyGUID rewrites a transport-agnostic "any;-;<address>" GUID to
+// one naming an explicit service, for the two address shapes that cannot send
+// without it. It reports false for everything else, leaving the GUID untouched.
+//
+// macOS 26 (Tahoe) stores every chat GUID with the "any;-;" prefix rather than
+// "iMessage;-;" or "SMS;-;". BlueBubbles derives the service from the prefix IT
+// IS GIVEN -- sendMessageFallback calls getServiceFromInput(chatGuid) and feeds
+// the result to buildServiceScript -- so it emits
+//
+//	set targetService to 1st account whose service type = any
+//
+// and Messages rejects "any", which is not one of its service-type constants:
+//
+//	execution error: Messages got an error: Can't make any into type
+//	constant. (-1700)
+//
+// Verified against Messages 26.0 on macOS 26.7: the same script with iMessage,
+// SMS or RCS in place of "any" resolves the participant fine, so the predicate
+// itself is sound and only the value is wrong. Upstream bug is
+// BlueBubblesApp/bluebubbles-server#777 (open, no fix released; PR #832 is an
+// unmerged draft), and the installed server 1.9.9 is the latest release, so
+// there is nothing to upgrade into.
+//
+// ONLY TWO SHAPES ARE REWRITTEN, each structurally tied to exactly one service
+// and each failing 100% of the time today:
+//
+//	urn:biz:<id>   Apple Business Chat, which exists only over iMessage
+//	<digits>       an SMS short code, which exists only over SMS
+//
+// Both were checked against what the chats actually carry rather than assumed:
+// of the messages bridged from them, the business chat is 177/177 iMessage and
+// the short code 3/3 SMS.
+//
+// EVERYTHING ELSE IS DELIBERATELY LEFT ALONE, including ordinary E.164 and
+// email chats, which also carry the "any;-;" prefix. Those send fine today,
+// because BlueBubbles tries a chat-ID send first and that matches the "any;-;"
+// GUID as stored; rewriting their prefix would stop matching it and push them
+// onto the AppleScript fallback for no reason. Restricting the rewrite to
+// addresses that are already broken means this patch cannot regress a send that
+// currently works.
+func resolveTahoeAnyGUID(chatID string) (string, bool) {
+	const anyPrefix = "any;-;"
+	address, ok := strings.CutPrefix(chatID, anyPrefix)
+	if !ok || address == "" {
+		return "", false
+	}
+	if strings.HasPrefix(address, "urn:biz:") {
+		return "iMessage;-;" + address, true
+	}
+	if isShortCode(address) {
+		return "SMS;-;" + address, true
+	}
+	return "", false
+}
+
+// isShortCode reports whether an address is a bare run of digits, which is an
+// SMS short code. An E.164 phone number is excluded by its leading "+", and an
+// email address by having no digits-only form at all.
+func isShortCode(address string) bool {
+	for _, r := range address {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // resolveSendGUID picks the right service for an outgoing chat GUID.
 //
 // With bridge.disable_sms_portals enabled, maybeGetPortalByGUID rewrites
@@ -1252,6 +1319,10 @@ func (bb *blueBubbles) isReachableOverIMessage(address string) (available bool, 
 // previous behaviour.
 func (bb *blueBubbles) resolveSendGUID(chatID string) string {
 	const imessagePrefix = "iMessage;-;"
+	if resolved, ok := resolveTahoeAnyGUID(chatID); ok {
+		bb.log.Debug().Str("from", chatID).Str("to", resolved).Msg("Rewrote transport-agnostic GUID to an explicit service")
+		return resolved
+	}
 	if !strings.HasPrefix(chatID, imessagePrefix) {
 		return chatID
 	}
