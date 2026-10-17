@@ -11,12 +11,13 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.24
 	github.com/rs/zerolog v1.31.0
 	github.com/sahilm/fuzzy v0.1.0
-	github.com/strukturag/libheif v1.19.5
+	github.com/strukturag/libheif v1.23.4
 	github.com/tidwall/gjson v1.17.0
 	go.mau.fi/util v0.2.1
 	golang.org/x/crypto v0.29.0
 	golang.org/x/exp v0.0.0-20241108190413-2d47ceb2692f
 	golang.org/x/image v0.22.0
+	gopkg.in/yaml.v3 v3.0.1
 	maunium.net/go/mauflag v1.0.0
 	maunium.net/go/maulogger/v2 v2.4.1
 	maunium.net/go/mautrix v0.16.1-0.20260514105528-3a919cb9e342
@@ -37,5 +38,4 @@ require (
 	golang.org/x/net v0.31.0 // indirect
 	golang.org/x/sys v0.27.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
