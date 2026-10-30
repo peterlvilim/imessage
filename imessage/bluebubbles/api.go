@@ -1029,9 +1029,10 @@ func (bb *blueBubbles) GetContactInfo(identifier string) (resp *imessage.Contact
 		return resp, nil
 
 	}
-	err = errors.New("no contacts found for address")
-	bb.log.Err(err).Str("identifier", identifier).Msg("No contacts matched address, aborting contact retrieval")
-	return nil, err
+	// Hourly for every such chat under PeriodicSync, and the identifier is a
+	// correspondent's address, so it stays out of the line.
+	bb.log.Debug().Msg("No contacts matched address, aborting contact retrieval")
+	return nil, imessage.ErrContactNotFound
 }
 
 func (bb *blueBubbles) GetContactList() (resp []*imessage.Contact, err error) {

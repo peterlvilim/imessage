@@ -292,7 +292,7 @@ func (puppet *Puppet) Sync() {
 	}
 
 	contact, err := puppet.bridge.IM.GetContactInfo(puppet.ID)
-	if err != nil && !errors.Is(err, ipc.ErrUnknownCommand) {
+	if err != nil && !errors.Is(err, ipc.ErrUnknownCommand) && !errors.Is(err, imessage.ErrContactNotFound) {
 		puppet.log.Errorln("Failed to get contact info:", err)
 	}
 

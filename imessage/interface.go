@@ -33,6 +33,9 @@ import (
 
 var (
 	ErrNotLoggedIn = errors.New("you're not logged into iMessage")
+	// ErrContactNotFound means the address is not in Contacts: the ordinary
+	// case for anyone who is not saved there, not a failure.
+	ErrContactNotFound = errors.New("no contacts found for address")
 )
 
 type ContactAPI interface {
