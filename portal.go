@@ -469,6 +469,14 @@ func (portal *Portal) markRead(intent *appservice.IntentAPI, eventID id.EventID,
 	return intent.SetReadMarkers(portal.MXID, &content)
 }
 
+// MSC2867's mark, stable since Matrix v1.12: room account data that says
+// the user marked the room unread.
+const markedUnreadType = "m.marked_unread"
+
+type markedUnreadContent struct {
+	Unread bool `json:"unread"`
+}
+
 func (portal *Portal) HandleiMessageReadReceipt(rr *imessage.ReadReceipt) {
 	if len(portal.MXID) == 0 {
 		return
@@ -479,11 +487,26 @@ func (portal *Portal) HandleiMessageReadReceipt(rr *imessage.ReadReceipt) {
 	} else if rr.SenderGUID == rr.ChatGUID {
 		intent = portal.MainIntent()
 	} else {
-		portal.log.Debugfln("Dropping unexpected read receipt %+v", *rr)
+		// Not %+v: the receipt carries the sender's handle, a phone number or
+		// an email, and this log goes to the fleet's log store.
+		portal.log.Debugfln("Dropping unexpected read receipt in %s", portal.MXID)
 		return
 	}
 	if intent == nil {
 		return
+	}
+
+	// The user's own read state from another device also says whether the
+	// chat is marked unread (m.marked_unread, which every Matrix client of
+	// the account shows). A read clears the mark, as reading does in Messages.
+	if rr.IsFromMe && intent == portal.bridge.user.DoublePuppetIntent {
+		err := intent.SetRoomAccountData(portal.MXID, markedUnreadType, &markedUnreadContent{Unread: rr.MarkedUnread})
+		if err != nil {
+			portal.log.Warnfln("Failed to set the unread mark in %s: %v", portal.MXID, err)
+		}
+		if rr.MarkedUnread {
+			return
+		}
 	}
 
 	if message := portal.bridge.DB.Message.GetLastByGUID(portal.GUID, rr.ReadUpTo); message != nil {

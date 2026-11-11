@@ -93,6 +93,10 @@ type ReadReceipt struct {
 	IsFromMe   bool   `json:"is_from_me"`
 	ChatGUID   string `json:"chat_guid"`
 	ReadUpTo   string `json:"read_up_to"`
+	// The user marked the chat unread on another device: IsFromMe, and
+	// ReadUpTo is not a read position. Only BlueBubbles' chat-read-status
+	// sets it.
+	MarkedUnread bool `json:"marked_unread,omitempty"`
 
 	ReadAt         time.Time `json:"-"`
 	JSONUnixReadAt float64   `json:"read_at"`

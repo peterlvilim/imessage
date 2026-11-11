@@ -72,7 +72,20 @@ type blueBubbles struct {
 	stopOnce sync.Once
 
 	usingPrivateAPI bool
+
+	// When this bridge last marked each chat read, by chat GUID. Marking a
+	// chat read through the Private API comes straight back as
+	// chat-read-status-changed, which says only "read" and is mapped to the
+	// chat's last message, so the echo would mark read anything that arrived
+	// between the receipt and the echo. handleChatReadStatusChanged skips a
+	// read status this soon after one of ours.
+	ownReadAt     map[string]time.Time
+	ownReadAtLock sync.Mutex
 }
+
+// How long after this bridge marks a chat read a "read" status for it is
+// taken as that receipt's echo rather than the user reading elsewhere.
+const ownReadEchoWindow = 10 * time.Second
 
 func NewBlueBubblesConnector(bridge imessage.Bridge) (imessage.API, error) {
 	return &blueBubbles{
@@ -88,6 +101,7 @@ func NewBlueBubblesConnector(bridge imessage.Bridge) (imessage.API, error) {
 		backfillTaskChan:  make(chan *imessage.BackfillTask, 32),
 
 		imessageAvailability: make(map[string]imessageAvailabilityEntry),
+		ownReadAt:            make(map[string]time.Time),
 		stopping:             make(chan struct{}),
 	}, nil
 }
@@ -502,6 +516,26 @@ func (bb *blueBubbles) chatRoomUpdate(rawMessage json.RawMessage, eventName stri
 	return nil
 }
 
+func (bb *blueBubbles) noteOwnRead(chatGUID string, at time.Time) {
+	bb.ownReadAtLock.Lock()
+	defer bb.ownReadAtLock.Unlock()
+	bb.ownReadAt[chatGUID] = at
+}
+
+func (bb *blueBubbles) isOwnReadEcho(chatGUID string, now time.Time) bool {
+	bb.ownReadAtLock.Lock()
+	defer bb.ownReadAtLock.Unlock()
+	at, ok := bb.ownReadAt[chatGUID]
+	if !ok {
+		return false
+	}
+	if now.Sub(at) > ownReadEchoWindow {
+		delete(bb.ownReadAt, chatGUID)
+		return false
+	}
+	return true
+}
+
 func (bb *blueBubbles) handleChatReadStatusChanged(data json.RawMessage) (err error) {
 	bb.log.Trace().RawJSON("data", data).Msg("handleChatReadStatusChanged")
 
@@ -523,19 +557,27 @@ func (bb *blueBubbles) handleChatReadStatusChanged(data json.RawMessage) (err er
 		return nil
 	}
 
-	lastMessage, err := bb.getMessage(chatInfo.Data.LastMessage.GUID)
-	if err != nil {
-		bb.log.Warn().Err(err).Msg("Failed to get last message")
+	var now = time.Now()
+
+	if rec.Read && bb.isOwnReadEcho(rec.ChatGUID, now) {
+		bb.log.Debug().Msg("Skipping chat read status: the echo of this bridge's own receipt")
 		return nil
 	}
 
-	var now = time.Now()
-
+	// chat-read-status-changed is the USER's read state, changed on one of
+	// their own devices (the iPhone, the Mac's Messages): BlueBubbles fires it
+	// when the chat's unread flag flips, and other people's reads arrive as
+	// message updates instead (handleMessageUpdated). Upstream sent it as
+	// IsFromMe: false with SenderGUID set to a bare handle, which
+	// HandleiMessageReadReceipt accepts only when it equals the chat GUID --
+	// never -- so every read on the phone was dropped and Matrix kept showing
+	// the chat unread. It carries no "up to", so it reads to the chat's last
+	// message.
 	var receipt = imessage.ReadReceipt{
-		SenderGUID:     lastMessage.Handle.Address, // TODO: Make sure this is the right field?
-		IsFromMe:       false,                      // changing this to false as I believe read receipts will always be from others
+		IsFromMe:       true,
 		ChatGUID:       rec.ChatGUID,
 		ReadUpTo:       chatInfo.Data.LastMessage.GUID,
+		MarkedUnread:   !rec.Read,
 		ReadAt:         now,
 		JSONUnixReadAt: timeToFloat(now),
 	}
@@ -1583,6 +1625,7 @@ func (bb *blueBubbles) SendReadReceipt(chatID, readUpTo string) error {
 	}
 
 	var res ReadReceiptResponse
+	bb.noteOwnRead(chatID, time.Now())
 	err := bb.apiPost(fmt.Sprintf("/api/v1/chat/%s/read", chatID), nil, &res)
 
 	if err != nil {
